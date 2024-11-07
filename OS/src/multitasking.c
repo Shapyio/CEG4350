@@ -15,15 +15,34 @@ proc_t *kernel;     // The kernel process
 
 // Select the next user process (proc_t *next) to run
 // Selection must be made from the processes array (proc_t processes[])
+// Count is the number of user processes are ready and available
 int schedule()
 {
     int count = 0;
-    int i = 1;
 
-    if(processes[i].type == PROC_USER && processes[i].status == PROC_READY) // Select first waiting user process
+    // Check how many processes there are left (return accurate count)
+    for (int i=0; i < MAX_PROCS; i++)
     {
-        next = &processes[i];
-        count = i;
+        if(processes[i].type == PROC_USER && processes[i].status == PROC_READY && processes[i].pid > prev->pid)
+        {
+            count++;
+        }
+    }
+
+    // Calculate start position for next loop
+    int next_pid = 0;
+    if (prev && prev->pid < MAX_PROCS - 1)
+    {
+        next_pid = running->pid + 1;
+    }
+
+    for (; next_pid < MAX_PROCS; next_pid++) // Loop through processes
+    {
+        if(processes[next_pid].type == PROC_USER && processes[next_pid].status == PROC_READY) // Select first waiting user process
+        {
+            next = &processes[next_pid];
+            return count;
+        }
     }
 
     return count;
@@ -48,11 +67,11 @@ int createproc(void *func, char *stack)
     process.type = PROC_USER;
 
     // Set the instruction pointer to the function
-    process.eip = func;                // func is where execution starts
+    process.eip = func;             // func is where execution starts
 
     // Initialize stack pointers
-    process.esp = stack;               // esp points to the top of the stack
-    process.ebp = stack;        // ebp is typically initialized to esp
+    process.esp = stack;            // esp points to the top of the stack
+    process.ebp = stack;            // ebp is typically initialized to esp
 
     // Assign PID and add process to process array
     process.pid = process_index;
@@ -180,6 +199,8 @@ void __attribute__((naked)) switchcontext()
     // Set the next instruction for this process to be the resume after the context switch
     running->eip    = &&resume;
 
+    // Set prev to the current running process
+    prev = running;
     // Start running the next process
     running = next;
     running->status = PROC_RUNNING;
