@@ -23,28 +23,40 @@ int schedule()
     // Check how many processes there are left (return accurate count)
     for (int i=0; i < MAX_PROCS; i++)
     {
-        if(processes[i].type == PROC_USER && processes[i].status == PROC_READY && processes[i].pid > prev->pid)
+        if(processes[i].type == PROC_USER && processes[i].status == PROC_READY)
         {
             count++;
         }
     }
 
-    // Calculate start position for next loop
-    int next_pid = 0;
-    if (prev && prev->pid < MAX_PROCS - 1)
+    // While processes available, schedule
+    if (count > 0)
     {
-        next_pid = running->pid + 1;
-    }
+        // Calculate start position for next loop
+        // If prev exists, make start prev + 1, bounded by processes
+        // Else, make it 0
+        int start = prev ? (prev->pid + 1) % process_index : 0;
 
-    for (; next_pid < MAX_PROCS; next_pid++) // Loop through processes
-    {
-        if(processes[next_pid].type == PROC_USER && processes[next_pid].status == PROC_READY) // Select first waiting user process
+        for (int i=0; i < MAX_PROCS; i++) // Loop through processes
         {
-            next = &processes[next_pid];
-            return count;
+            int pid = (start + i) % process_index;
+
+            // DEBUGGING TEXT
+            // printf("\nSTART: ");
+            // printint(start);
+            // printf(", PID: ");
+            // printint(pid);
+            // printf(", COUNT: ");
+            // printint(count);
+            // printf("\n");
+
+            if(processes[pid].type == PROC_USER && processes[pid].status == PROC_READY) // Select first waiting user process
+            {
+                next = &processes[pid];
+                return count;
+            }
         }
     }
-
     return count;
 }
 

@@ -1,5 +1,5 @@
 #include "./types.h"
-#include "./hal.h"
+#include "io.h" // Errata
 void floppy_detect_drives();
 int floppy_init();
 int floppy_read(int drive, uint32 lba, void* address, uint16 count);
