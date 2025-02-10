@@ -8,3 +8,6 @@ The projects build off one another.
 - Project 3: Primitive multitasking implemented. `multitasking.c`/`multitasking.h` provided. Implemented `schedule()`, `yield()`, `exit()`, and `createproc(func, stack)`. Now running new provided `kernel.c` multitasking takes place.
 - Project 4: Implement custom scheduling, cooperative round robin scheduling.
 - Project 5: Implement file system. 
+
+## How to Launch:
+Bochs is needed to compile and boot the OS. Run `wsl make` in the OS folder to compile a bochs boot file. From there, load the boot file in bochs and start. Currently, the boot file should load the file system. You can `git pull` older project commits to see how the different parts work.
