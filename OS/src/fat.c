@@ -1,5 +1,8 @@
 #include "./fat.h"
 #include "./fdc.h"
+#include <stddef.h>
+#include "./string.h"
+#include "./io.h"
 
 // FAT Copies
 // First copy is fat0 stored at 
@@ -39,31 +42,38 @@ void closeFile(file_t *file)
 {
     if (file != NULL || file->isOpened == 1)
     {
-        uint16 currentCluster = file->entry->startingCluster;
+        uint16 current = file->entry.startingCluster;
         uint32 index = 0;
-        uint32 remainingSize = file->entry->fileSize;
+        uint32 remainingSize = file->entry.fileSize;
 
         while (remainingSize > 0)
         {
+            // Write file contents to storage
             uint32 sectorSize = remainingSize > 512 ? 512 : remainingSize;
-            floppy_write(0, 33 + currentCluster - 2, (void *)(file->startingAddress + index), 512);
-            index += sectorSize;
-            remainingSize -= sectorSize;
+            floppy_write(0, 33 + (current - 2), (void *)(file->startingAddress + index), 1);
+            index += sectorSize; // Offset by a sector of data
+            remainingSize -= sectorSize; // Remove a sector of bytes
 
-            if (remainingSize > 0 && fat0->entries[currentCluster] == 0xFFFF)
+            // If no more data to write and at EOF
+            if (remainingSize > 0 && fat0->entries[current] == 0xFFFF)
             {
-                uint16 newCluster = findFreeCluster();
-                if (newCuster == 0xFFFF)
+                // Go through all clusters
+                for (uint16 i=2; i<2304; i++)
                 {
-                    return; // No free clusters
+                    // If empty cluster
+                    if (fat0->entries[i] == 0x0000)
+                    {
+                        fat0->entries[current] = i;      // Save cluster addr to current cluster
+                        current = i;                     // Set free cluster as current cluster
+                        fat0->entries[current] = 0xFFFF; // Mark EOF (the free cluster now EOF)
+                        break;
+                    }
                 }
-                fat0->entries[currentCluster] = newCluster;
-                fat0->entries[newCluster] = 0xFFFF; // Mark as end
             }
-
-            currentCluster = fat0->entries[currentCluster];
+            else {
+                current = fat0->entries[current]; // Set current as new cluster
+            }
         }
-
         file->isOpened = 0; // Make file open false (closed)
 
     } else {
@@ -73,16 +83,18 @@ void closeFile(file_t *file)
 
 int openFile(file_t *file)
 {
-    if (file != NULL || file->entry != NULL)
+    if (file != NULL || file->entry.startingCluster >= 33) // Sector 33 is start of kernel executable 
     {
-        uint16 currentCluster = file->entry->startingCluster;
+        uint16 current = file->entry.startingCluster;
         uint32 index = 0;
+        file->startingAddress = (uint8 *)0x30000; 
 
-        while (currentCluster != 0xFFFF)
+        // If not EOF, load more data
+        while (current != 0xFFFF)
         {
-            floppy_read(0, 33 + currentCluster, (void *)(file->startingAddress + index), 1);
-            index += 512; // Next sector
-            currentCluster = fat0->entries[currentCluster]; //
+            floppy_read(0, 33 + (current - 2), (void *)(file->startingAddress + index), 512);
+            index += 512; // Offset for next sector of data
+            current = fat0->entries[current]; // Get next cluster
         }
 
         file->isOpened = 1; // Make file open true
@@ -105,24 +117,32 @@ int openFile(file_t *file)
 // 0xA400 - 0xA5FF: Our file (1 sector) contains either 0's or "Hello World!\n"
 int createFile(file_t *file, directory_t *parent)
 {
-    if (file != NULL || parent != NULL || parent->entry != NULL)
+    // IFF file and parent exists
+    if (file != NULL && parent != NULL && parent->entry.startingCluster != 0)
     {
-        uint16 cluster = findFreeCluster();
-        if (cluster == 0xFFFF)
+        directory_entry_t *entry = (directory_entry_t *)parent->startingAddress;
+       
+        stringcopy((char *)file->entry.filename, (char *)entry->filename, 8);   // Filenames are 8 characters
+        stringcopy((char *)file->entry.extension, (char *)entry->extension, 3); // Extensions are 3 chars
+
+        // Set up metadata for new file
+        entry->attributes = 0x00;   // Normal file code
+        entry->fileSize = 0;        // 0 because no data stored
+
+        for (uint16 i=2; i<2304; i++)
         {
-            return -1; // No free clusters
+            if (fat0->entries[i] == 0x0000) // If cluster is free/empty
+            {
+                entry->startingCluster = i;     // Set starting cluster to i (free cluster)
+                fat0->entries[i] = 0xFFFF;   // Mark cluster as EOF (because no data stored yet)
+                break;
+            }
         }
+        file->entry = *entry; // Copy entry metadata to file data
 
-        file_entry_t *entry = parent->entry;
-        memset(entry, 0, sizeof(file_entry_t)); // Clear entry memory
-        memcpy(entry->filename, file->entry->filename, 8); // Load name into memory
-        memcpy(entry->extension, file->entry->extension, 3); // Load extension into memory
-        entry->startingCluster = cluster;
-        entry->fileSize = 0;
-        fat0->entries[cluster] = 0xFFFF; // Mark EOF
-
-        closeFile(file);
+        closeFile(file);                // Close file (not in use, just created)
     } else {
+
         return -1; // No file or parent directory found
     }
 
@@ -131,19 +151,23 @@ int createFile(file_t *file, directory_t *parent)
 
 void deleteFile(file_t *file, directory_t *parent)
 {
-    if (file != NULL || parent != NULL || parent->entry != NULL)
+    if (file != NULL && parent != NULL && parent->entry.startingCluster != 0)
     {
-        uint16 cluster = file->entry.startingCluster;   // get cluster of file
+        uint16 current = file->entry.startingCluster;   // get cluster of file
 
         // Loop thru clusters until EOF (Last cluster)
-        while (cluster != 0xFFFF)
+        while (current != 0xFFFF)
         {
-            uint16 next = fat0->entries[cluster];       // entries[cluster] has next cluster #
-            fat0->entries[cluster] = 0x0000;            // Make cluster empty
-            cluster = next;
+            uint16 next = fat0->entries[current];       // entries[cluster] has next cluster #
+            fat0->entries[current] = 0x0000;            // Make cluster empty
+            current = next;
         }
 
-        // Updating parent directory by removing directory entry
+        // Sync FAT1 with FAT0
+        for (uint16 i=0; i<2304; i++)
+            fat1->entries[i] = fat0->entries[i];
+
+        // Updating parent directory by removing directory entry as per instruction
         directory_entry_t *entry = (directory_entry_t *)parent->startingAddress;
         while (entry->filename[0] != 0)
         {
@@ -167,7 +191,9 @@ void deleteFile(file_t *file, directory_t *parent)
 // This function requires the file to have been loaded into memory with floppy_read()
 uint8 readByte(file_t *file, uint32 index)
 {
-    return *((unit8_t *)(file->startingAddress + index));
+    if (file != NULL && file->isOpened)
+        return *((uint8 *)(file->startingAddress + index));
+    return 0;
 }
 
 // Writes a byte to a file that is currently loaded into memory
@@ -180,8 +206,8 @@ int writeByte(file_t *file, uint8 byte, uint32 index)
         return -1; //File not opened
     }
 
-    *((unit8_t *)(file->startingAddress + index)) = byte; // Add bye to index
-    file->entry->fileSize++;                              // Update file size
+    *((uint8 *)(file->startingAddress + index)) = byte; // Add bye to index
+    file->entry.fileSize++;                              // Update file size
 
     return 0;
 }
@@ -204,4 +230,199 @@ int findFile(char *filename, char* ext, directory_t directory, directory_entry_t
 	}
 
 	return 0;
+}
+
+// Renames the file in the parent directory entry with the new filename and extension.
+// Once the parent directory entry is modified, the changes must be written to the floppy disk using floppy_write()
+void renameFile(file_t *file, directory_t *parent, char *newFilename, char *newExtension)
+{
+    // Pre check
+    if (file == NULL || parent == NULL || parent->entry.startingCluster == 0)
+    {
+        return; // Invalid file or parent directory
+    }
+
+    directory_entry_t *entry = (directory_entry_t *)parent->startingAddress;
+
+    // Search for the file in the parent directory
+    while (entry->filename[0] != 0)
+    {
+        if (stringcompare((char *)entry->filename, (char *)file->entry.filename, 8) &&
+            stringcompare((char *)entry->extension, (char *)file->entry.extension, 3))
+        {
+            // Update filename and extension
+            stringcopy((char *)entry->filename, newFilename, 8);
+            stringcopy((char *)entry->extension, newExtension, 3);
+
+            // Dynamically determine where to write the directory back to floppy disk
+            uint16 numSectors = (uint16)((parent->entry.fileSize + 511) / 512); // Total sectors (fileSize rounded up)
+
+            // Write the updated directory back to disk
+            floppy_write(0, 33 + (parent->entry.startingCluster - 2), parent->startingAddress, numSectors);
+
+            // Update the file's metadata in memory
+            stringcopy((char *)file->entry.filename, newFilename, 8);
+            stringcopy((char *)file->entry.extension, newExtension, 3);
+
+            return; // File successfully renamed
+        }
+        entry++;
+    }
+}
+
+// Verifies both copies of FAT
+// Replaces any inconsistencies with 0x0001, and if any inconsistencies, write both copies of FAT to the disk
+// Example:
+// if fat0->entries[5] = 6 and fat1->entries[5] = 0, rewrite both to fat0->entries[5] = fat1->entries[5] = 1.
+// If no inconsistencies, return 0, if any inconsistencies, return count of how many
+int verifyFAT()
+{
+    int inconsistencies = 0;
+
+    // Compare each entry of fat0 and fat1
+    for (uint16 i = 0; i < 2304; i++) // 2304 entries in each FAT
+    {
+        if (fat0->entries[i] != fat1->entries[i])
+        {
+            // Correct the inconsistency by setting both to 0x0001
+            fat0->entries[i] = 0x0001;
+            fat1->entries[i] = 0x0001;
+
+            inconsistencies++;
+        }
+    }
+
+    // If inconsistencies were found, write both FATs back to disk
+    if (inconsistencies > 0)
+    {
+        // Similar to floppy_read command in init_fs
+        floppy_write(0, 1, (void *)fat0, sizeof(fat_t));  // Write first FAT back to disk
+        floppy_write(0, 10, (void *)fat1, sizeof(fat_t)); // Write second FAT back to disk
+    }
+
+    return inconsistencies; // Return the number of inconsistencies
+}
+
+// Load entire boot sector from disk 0 into memory from addresses 0x40000 to 0x401FF
+// 1FF = 512
+// floppy_read(0, 0, 0x40000, 512);
+
+// The and return the number of clusters that the file_t *file occupies.
+uint16 clusterCount(file_t *file)
+{
+    uint16 current = file->entry.startingCluster;
+    uint16 count = 1;   // Counting first cluster
+
+    // If not EOF, load more data
+    while (current != 0xFFFF)
+    {
+        count++;
+        current = fat0->entries[current]; // Get next cluster
+    }
+
+    return count;
+}
+
+/*
+* Example of clusterCount:
+* Index Entry
+* x0002 xFFFF
+* x0003 x0007
+* x0004 x0003
+* x0005 x0004
+* x0006 x0002
+* x0007 xFFFF
+* x0008 xFFFF
+*/
+
+// Move clusterA and its data to clusterB in the FAT
+int moveCluster(uint16 clusterA, uint16 clusterB)
+{
+    // Check if clusterB is currently occupied, if so return -1
+    if (fat->entries[clusterB] != 0x0000)
+    {
+        return -1;
+    }
+
+    uint16 buffer[512]; // Buffer to save data from cluster
+
+    // Grab data inside sector at Cluster A, 
+    floppy_read(0, 33 + (clusterA - 2), (void *)buffer, 512);
+    // Move it to Cluster B
+    floppy_write(0, 33 + (clusterB - 2), (void *)buffer, 512);
+
+    // Link Cluster B
+    fat->entries[clusterB] = fat->entries[clusterA];
+    // Now ClusterB points to clusterA's next cluster
+
+    // Clear Cluster A
+    fat0->entries[clusterA] = 0x0000; // Mark clusterA as free
+
+    // Save/Update FATs
+    // Sync FAT1 with FAT0
+    for (uint16 i=0; i<2304; i++)
+        fat1->entries[i] = fat0->entries[i];
+    return 0;
+}
+
+int moveCluster(uint16 clusterA, uint16 clusterB)
+{
+    // Check if clusterB is currently occupied, if so return -1
+    if (fat0->entries[clusterB] != 0x0000)
+    {
+        return -1; // ClusterB is not free
+    }
+
+    // Initialize variables for reading and writing
+    uint8 buffer[512]; // Buffer to hold data for one sector
+    uint16 current = clusterA; // Start from clusterA
+    uint32 index = 0; // Index for the buffer
+
+    // Read data from clusterA
+    while (current != 0xFFFF)
+    {
+        // Read the data from the current cluster into the buffer
+        floppy_read(0, 33 + (current - 2), buffer, 512);
+
+        // Write the data to clusterB
+        floppy_write(0, 33 + (clusterB - 2), buffer, 512);
+
+        // Move to the next cluster in the chain
+        current = fat0->entries[current];
+
+        // If we have more clusters to move, we need to find the next free cluster
+        if (current != 0xFFFF)
+        {
+            // Find the next free cluster for clusterB
+            uint16 nextFreeCluster = 0xFFFF; // Initialize to indicate no free cluster found
+            for (uint16 i = 2; i < 2304; i++)
+            {
+                if (fat0->entries[i] == 0x0000) // If cluster is free
+                {
+                    nextFreeCluster = i; // Found a free cluster
+                    break;
+                }
+            }
+
+            if (nextFreeCluster == 0xFFFF)
+            {
+                return -1; // No free cluster available to continue moving
+            }
+
+            // Update the FAT to link the current cluster to the next free cluster
+            fat0->entries[clusterB] = nextFreeCluster; // Link clusterB to the next free cluster
+            clusterB = nextFreeCluster; // Move to the next free cluster for the next iteration
+        }
+    }
+
+    // Clear the original clusterA in the FAT
+    fat0->entries[clusterA] = 0x0000; // Mark clusterA as free
+
+    // Sync FAT1 with FAT0
+    for (uint16 i = 0; i < 2304; i++)
+    {
+        fat1->entries[i] = fat0->entries[i];
+    }
+
+    return 0; // Success
 }
